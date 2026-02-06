@@ -191,14 +191,12 @@ class Person(SuperPosition):
         father = self.father.get()
         if father is not None:
             self.mother.remove(father)
-            father_age = population.people[father].age.get()
-            if father_age is not None:
-                self.age.smaller_than(father_age - Config.MINIMUM_PARENT_AGE)
+            if population.people[father].age.is_valid():
+                self.age.smaller_than(population.people[father].age.max - Config.MINIMUM_PARENT_AGE)
         mother = self.mother.get()
         if mother is not None:
-            mother_age = population.people[mother].age.get()
-            if mother_age is not None:
-                self.age.smaller_than(mother_age - Config.MINIMUM_PARENT_AGE)
+            if population.people[mother].age.is_valid():
+                self.age.smaller_than(population.people[mother].age.max - Config.MINIMUM_PARENT_AGE)
         self.mother.collapse(rnd, None)
         self.gender.collapse(rnd, None)
         self.age.collapse(rnd, 123)
