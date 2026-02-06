@@ -103,7 +103,7 @@ class SuperPosition(ABC, Generic[E]):
         pass
 
     @abstractmethod
-    def collapse(self, rnd: Random, default: E) -> None:
+    def collapse(self, rnd: Random, **kwargs) -> None:
         pass
 
 class SuperList(SuperPosition[E]):
@@ -115,7 +115,7 @@ class SuperList(SuperPosition[E]):
     def is_valid(self) -> bool:
         return len(self.possible_values) > 0
     
-    def collapse(self, rnd: Random, default: E|None) -> None:
+    def collapse(self, rnd: Random, default: E|None=None, **kwarsg) -> None:
         self.is_collapsed = True
         self.value = rnd.choice(self.possible_values) if self.is_valid() else default
         if self.is_valid():
@@ -143,7 +143,7 @@ class SuperRange(SuperPosition[int]):
     def is_valid(self) -> bool:
         return self.min <= self.max
     
-    def collapse(self, rnd: Random, default: int) -> None:
+    def collapse(self, rnd: Random, default: int=-1, **kwargs) -> None:
         self.is_collapsed = True
         self.value = rnd.randint(self.min, self.max) if self.is_valid() else default
         if self.is_valid():
@@ -184,12 +184,21 @@ class Person(SuperPosition):
         return self.name is not None and self.father.is_collapsed and self.mother.is_collapsed\
             and self.gender.is_collapsed and self.age.is_collapsed
     
-    def collapse(self, rnd: Random, default=None) -> None:
+    def collapse(self, rnd: Random, population:Population|None=None, **kwargs) -> None:
         self.name = Person.get_random_name(rnd)
         self.father.collapse(rnd, None)
+        assert population is not None
         father = self.father.get()
         if father is not None:
             self.mother.remove(father)
+            father_age = population.people[father].age.get()
+            if father_age is not None:
+                self.age.smaller_than(father_age - Config.MINIMUM_PARENT_AGE)
+        mother = self.mother.get()
+        if mother is not None:
+            mother_age = population.people[mother].age.get()
+            if mother_age is not None:
+                self.age.smaller_than(mother_age - Config.MINIMUM_PARENT_AGE)
         self.mother.collapse(rnd, None)
         self.gender.collapse(rnd, None)
         self.age.collapse(rnd, 123)
@@ -310,7 +319,7 @@ class Population:
             if person is None:
                 return
             if VERBOSE > 0: input(f"{person.id} is selected")
-            person.collapse(rnd)
+            person.collapse(rnd, self)
             if VERBOSE > 0: print(str(self))
             self.propagate(person)
             if VERBOSE > 0: print(str(self))
