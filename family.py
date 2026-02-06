@@ -186,18 +186,18 @@ class Person(SuperPosition):
     
     def collapse(self, rnd: Random, population:Population|None=None, **kwargs) -> None:
         self.name = Person.get_random_name(rnd)
-        self.father.collapse(rnd, None)
         assert population is not None
+        self.father.collapse(rnd, None)
         father = self.father.get()
         if father is not None:
             self.mother.remove(father)
             if population.people[father].age.is_valid():
                 self.age.smaller_than(population.people[father].age.max - Config.MINIMUM_PARENT_AGE)
+        self.mother.collapse(rnd, None)
         mother = self.mother.get()
         if mother is not None:
             if population.people[mother].age.is_valid():
                 self.age.smaller_than(population.people[mother].age.max - Config.MINIMUM_PARENT_AGE)
-        self.mother.collapse(rnd, None)
         self.gender.collapse(rnd, None)
         self.age.collapse(rnd, 123)
     
