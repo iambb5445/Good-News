@@ -110,10 +110,13 @@ class WFCGraph:
     """Central state container for the WFC solver.
 
     Initialized with num_nodes, property_specs (name -> frozenset of values),
-    and edge_labels. All N*(N-1)*L directed edges start as POTENTIAL.
+    and edge_labels. If edge_pairs is None, all N*(N-1)*L directed edges start
+    as POTENTIAL (dense). If edge_pairs is provided (list of (src, tgt, label)
+    tuples), only those edges are created (sparse).
     """
 
-    def __init__(self, num_nodes: int, property_specs: dict, edge_labels: list):
+    def __init__(self, num_nodes: int, property_specs: dict, edge_labels: list,
+                 edge_pairs=None):
         self.num_nodes = num_nodes
         self.property_specs = property_specs  # name -> frozenset
         self.edge_labels = list(edge_labels)
@@ -128,11 +131,30 @@ class WFCGraph:
 
         # edges[(src, tgt, label)] = EdgeState
         self._edges = {}
-        for src in range(num_nodes):
-            for tgt in range(num_nodes):
-                if src != tgt:
-                    for label in edge_labels:
-                        self._edges[(src, tgt, label)] = EdgeState.POTENTIAL
+
+        # Adjacency indices for efficient neighbor lookup (topology, static)
+        # _adj_out[node][label] = set of target nodes
+        # _adj_in[node][label] = set of source nodes
+        self._adj_out = [{label: set() for label in edge_labels}
+                         for _ in range(num_nodes)]
+        self._adj_in = [{label: set() for label in edge_labels}
+                        for _ in range(num_nodes)]
+
+        if edge_pairs is not None:
+            for src, tgt, label in edge_pairs:
+                key = (src, tgt, label)
+                if key not in self._edges:
+                    self._edges[key] = EdgeState.POTENTIAL
+                    self._adj_out[src][label].add(tgt)
+                    self._adj_in[tgt][label].add(src)
+        else:
+            for src in range(num_nodes):
+                for tgt in range(num_nodes):
+                    if src != tgt:
+                        for label in edge_labels:
+                            self._edges[(src, tgt, label)] = EdgeState.POTENTIAL
+                            self._adj_out[src][label].add(tgt)
+                            self._adj_in[tgt][label].add(src)
 
         # Soft weights: (node, prop, value) -> float, default 1.0
         self._soft_weights = {}
@@ -141,7 +163,10 @@ class WFCGraph:
         return self._domains[node][prop]
 
     def edge_state(self, src: int, tgt: int, label: str) -> EdgeState:
-        return self._edges[(src, tgt, label)]
+        key = (src, tgt, label)
+        if key not in self._edges:
+            return EdgeState.ELIMINATED
+        return self._edges[key]
 
     def restrict_domain(self, node: int, prop: str, allowed) -> bool:
         """Intersect domain with allowed values. Returns True if changed."""
@@ -161,7 +186,14 @@ class WFCGraph:
 
     def set_edge_state(self, src: int, tgt: int, label: str, state: EdgeState):
         """Update edge state. Raises on invalid transitions."""
-        current = self._edges[(src, tgt, label)]
+        key = (src, tgt, label)
+        if key not in self._edges:
+            if state == EdgeState.ELIMINATED:
+                return  # Non-existent edge is already effectively eliminated
+            raise ContradictionError(
+                f"Edge ({src},{tgt},{label}) does not exist in sparse graph"
+            )
+        current = self._edges[key]
         if current == state:
             return
         # Valid transitions: POTENTIAL -> ESTABLISHED, POTENTIAL -> ELIMINATED
@@ -170,7 +202,7 @@ class WFCGraph:
                 f"Cannot transition edge ({src},{tgt},{label}) from "
                 f"{current.value} to {state.value}"
             )
-        self._edges[(src, tgt, label)] = state
+        self._edges[key] = state
 
     def get_established_edges(self, label: str) -> list:
         """Return list of (src, tgt) for established edges with given label."""
@@ -186,11 +218,9 @@ class WFCGraph:
         if states is None:
             states = {EdgeState.POTENTIAL, EdgeState.ESTABLISHED}
         result = []
-        for src in range(self.num_nodes):
-            if src != node:
-                key = (src, node, label)
-                if key in self._edges and self._edges[key] in states:
-                    result.append((src, node))
+        for src in self._adj_in[node][label]:
+            if self._edges[(src, node, label)] in states:
+                result.append((src, node))
         return result
 
     def outgoing_edges(self, node: int, label: str,
@@ -199,11 +229,9 @@ class WFCGraph:
         if states is None:
             states = {EdgeState.POTENTIAL, EdgeState.ESTABLISHED}
         result = []
-        for tgt in range(self.num_nodes):
-            if tgt != node:
-                key = (node, tgt, label)
-                if key in self._edges and self._edges[key] in states:
-                    result.append((node, tgt))
+        for tgt in self._adj_out[node][label]:
+            if self._edges[(node, tgt, label)] in states:
+                result.append((node, tgt))
         return result
 
     def is_collapsed(self, node: int) -> bool:
@@ -347,46 +375,28 @@ class EdgeConstraint(Constraint):
     def initial_propagate(self, ctx: PropagationContext):
         # Check all existing potential/established edges
         g = ctx.graph
-        for src in range(g.num_nodes):
-            for tgt in range(g.num_nodes):
-                if src == tgt:
-                    continue
-                key = (src, tgt, self.label)
-                if key not in g._edges:
-                    continue
-                state = g._edges[key]
-                if state == EdgeState.ELIMINATED:
-                    continue
-                self._check_edge(ctx, src, tgt, state)
+        for (src, tgt, label), state in list(g._edges.items()):
+            if label != self.label:
+                continue
+            if state == EdgeState.ELIMINATED:
+                continue
+            self._check_edge(ctx, src, tgt, state)
 
     def propagate(self, ctx: PropagationContext, node: int, prop: str):
         if prop != self.source_prop and prop != self.target_prop:
             return
         g = ctx.graph
+        active = {EdgeState.POTENTIAL, EdgeState.ESTABLISHED}
         # Check outgoing edges where this node is source
         if prop == self.source_prop:
-            for tgt in range(g.num_nodes):
-                if tgt == node:
-                    continue
-                key = (node, tgt, self.label)
-                if key not in g._edges:
-                    continue
-                state = g._edges[key]
-                if state == EdgeState.ELIMINATED:
-                    continue
-                self._check_edge(ctx, node, tgt, state)
+            for src, tgt in g.outgoing_edges(node, self.label, active):
+                state = g._edges[(src, tgt, self.label)]
+                self._check_edge(ctx, src, tgt, state)
         # Check incoming edges where this node is target
         if prop == self.target_prop:
-            for src in range(g.num_nodes):
-                if src == node:
-                    continue
-                key = (src, node, self.label)
-                if key not in g._edges:
-                    continue
-                state = g._edges[key]
-                if state == EdgeState.ELIMINATED:
-                    continue
-                self._check_edge(ctx, src, node, state)
+            for src, tgt in g.incoming_edges(node, self.label, active):
+                state = g._edges[(src, tgt, self.label)]
+                self._check_edge(ctx, src, tgt, state)
 
     def propagate_edge(self, ctx: PropagationContext, src: int, tgt: int,
                        label: str, new_state: EdgeState):
@@ -718,60 +728,56 @@ class WFCSolver:
     def _resolve_edges(self):
         """Resolve remaining potential edges after all properties collapsed."""
         g = self.graph
-        for label in g.edge_labels:
-            for src in range(g.num_nodes):
-                for tgt in range(g.num_nodes):
-                    if src == tgt:
-                        continue
-                    key = (src, tgt, label)
-                    if g._edges[key] == EdgeState.POTENTIAL:
-                        # Check if the edge is valid given collapsed values
-                        valid = True
-                        for c in self.constraints:
-                            if isinstance(c, EdgeConstraint) and c.label == label:
-                                sv = g.get_value(src, c.source_prop)
-                                tv = g.get_value(tgt, c.target_prop)
-                                if not c.predicate(sv, tv):
-                                    valid = False
-                                    break
-                        if not valid:
-                            self._ctx.set_edge_state(src, tgt, label,
-                                                     EdgeState.ELIMINATED)
-                        else:
-                            # Check cardinality before establishing
-                            can_establish = True
-                            for c in self.constraints:
-                                if (isinstance(c, CardinalityConstraint)
-                                        and c.label == label):
-                                    if c.direction == "incoming":
-                                        est = g.incoming_edges(
-                                            tgt, label,
-                                            {EdgeState.ESTABLISHED})
-                                        if (c.max_count is not None
-                                                and len(est) >= c.max_count):
-                                            can_establish = False
-                                    else:
-                                        est = g.outgoing_edges(
-                                            src, label,
-                                            {EdgeState.ESTABLISHED})
-                                        if (c.max_count is not None
-                                                and len(est) >= c.max_count):
-                                            can_establish = False
-                            if not can_establish:
-                                self._ctx.set_edge_state(
-                                    src, tgt, label, EdgeState.ELIMINATED)
+        # Collect potential edges grouped by label
+        potential_by_label = {label: [] for label in g.edge_labels}
+        for (src, tgt, label), state in g._edges.items():
+            if state == EdgeState.POTENTIAL:
+                potential_by_label[label].append((src, tgt))
+
+        for label, edges in potential_by_label.items():
+            for src, tgt in edges:
+                if g._edges[(src, tgt, label)] != EdgeState.POTENTIAL:
+                    continue  # May have been resolved by propagation
+                # Check if the edge is valid given collapsed values
+                valid = True
+                for c in self.constraints:
+                    if isinstance(c, EdgeConstraint) and c.label == label:
+                        sv = g.get_value(src, c.source_prop)
+                        tv = g.get_value(tgt, c.target_prop)
+                        if not c.predicate(sv, tv):
+                            valid = False
+                            break
+                if not valid:
+                    self._ctx.set_edge_state(src, tgt, label,
+                                             EdgeState.ELIMINATED)
+                else:
+                    # Check cardinality before establishing
+                    can_establish = True
+                    for c in self.constraints:
+                        if (isinstance(c, CardinalityConstraint)
+                                and c.label == label):
+                            if c.direction == "incoming":
+                                est = g.incoming_edges(
+                                    tgt, label,
+                                    {EdgeState.ESTABLISHED})
+                                if (c.max_count is not None
+                                        and len(est) >= c.max_count):
+                                    can_establish = False
                             else:
-                                # Leave as potential - will be eliminated below
-                                pass
+                                est = g.outgoing_edges(
+                                    src, label,
+                                    {EdgeState.ESTABLISHED})
+                                if (c.max_count is not None
+                                        and len(est) >= c.max_count):
+                                    can_establish = False
+                    if not can_establish:
+                        self._ctx.set_edge_state(
+                            src, tgt, label, EdgeState.ELIMINATED)
 
             # Eliminate all remaining potential edges for this label
-            for src in range(g.num_nodes):
-                for tgt in range(g.num_nodes):
-                    if src == tgt:
-                        continue
-                    key = (src, tgt, label)
-                    if g._edges[key] == EdgeState.POTENTIAL:
-                        self._ctx.set_edge_state(src, tgt, label,
-                                                 EdgeState.ELIMINATED)
+            for src, tgt in edges:
+                if g._edges[(src, tgt, label)] == EdgeState.POTENTIAL:
+                    self._ctx.set_edge_state(src, tgt, label,
+                                             EdgeState.ELIMINATED)
         # Final propagation
         self._propagate()
