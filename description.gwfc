@@ -1,0 +1,59 @@
+.max_age 100
+.min_parent_age_diff 18
+.max_parent_age_diff 40
+.parent_lca_dist 4
+
+nodes {
+    person {
+        name <str>
+        gender [male, female]
+        age (0, .max_age)
+        hair_color [brown, red, black, blonde]
+        eye_color [brown, blue, green]
+    }
+    location {
+        name <str>
+    }
+}
+
+edges {
+    father {
+        person f to person x
+        f.gender == male
+        f.age > x.age + .min_parent_age_diff
+        f.age < x.age + .max_parent_age_diff
+        for every mother.to.x m: min(dist(lca(m, f), f), dist(lca(m, f), m)) > .parent_lca_dist
+    }
+    mother {
+        person m to person x
+        m.gender == female
+        m.age > x.age + .min_parent_age_diff
+        m.age < x.age + .max_parent_age_diff
+        for every father.to.x f: min(dist(lca(m, f), f), dist(lca(m, f), m)) > .parent_lca_dist
+    }
+    friend {
+        person x to person y
+        bidirectional
+    }
+    home {
+        location x to person y
+    }
+    work {
+        location x to person y
+    }
+}
+
+global {
+    for every person p: {
+        home.to.p.degree == 1
+        work.to.p.degree <= 1
+        father.to.p.degree <= 1
+        mother.to.p.degree <= 1
+    }
+}
+
+probability {
+    for every person p, hair_color h: {
+        p.prob[hair_color][h] = (avg(father.to.p.prob[hair_color][h]) + avg(mother.to.p.prob[hair_color][h])) / 2
+    }
+}
