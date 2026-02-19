@@ -600,15 +600,24 @@ class WFCSolver:
         self.epsilon = epsilon
         self._ctx = PropagationContext(graph)
 
-    def solve(self) -> bool:
-        """Attempt to solve. Returns True if successful."""
+    def solve(self, step_callback=None, step_callback_reset=None) -> bool:
+        """Attempt to solve. Returns True if successful.
+
+        Args:
+            step_callback: Optional callable(graph) invoked after each WFC
+                observation and at key checkpoints (post-init, post-edge-resolution).
+            step_callback_reset: Optional callable() invoked when a restart occurs
+                so the caller can clear accumulated frames from failed attempts.
+        """
         initial_snap = self.graph.snapshot()
         for attempt in range(self.max_restarts):
             if attempt > 0:
                 self.graph.restore(initial_snap)
                 self._ctx = PropagationContext(self.graph)
+                if step_callback_reset is not None:
+                    step_callback_reset()
             try:
-                if self._solve_inner():
+                if self._solve_inner(step_callback=step_callback):
                     return True
             except ContradictionError:
                 continue
@@ -629,9 +638,11 @@ class WFCSolver:
         self._ctx.set_edge_state(src, tgt, label, EdgeState.ELIMINATED)
         self._propagate()
 
-    def _solve_inner(self) -> bool:
+    def _solve_inner(self, step_callback=None) -> bool:
         """Single solve attempt. Returns True on success, raises on contradiction."""
         self._initialize()
+        if step_callback is not None:          # Point A: after initialization
+            step_callback(self.graph)
 
         while not self.graph.is_fully_collapsed():
             if self.epsilon > 0 and self.rng.random() < self.epsilon:
@@ -701,9 +712,13 @@ class WFCSolver:
                 raise ContradictionError(
                     f"All values exhausted for node {node} property '{prop}'"
                 )
+            if step_callback is not None:      # Point B: after each successful collapse
+                step_callback(self.graph)
 
         # Resolve remaining potential edges
         self._resolve_edges()
+        if step_callback is not None:          # Point C: after edge resolution
+            step_callback(self.graph)
         return True
 
     def _initialize(self):
