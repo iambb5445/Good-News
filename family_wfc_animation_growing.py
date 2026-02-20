@@ -30,8 +30,8 @@ from family_wfc_animation import (
     HERITABLE_PROPS, CHAR_ASPECT,
     FATHER_POTENTIAL, FATHER_ESTABLISHED,
     MOTHER_POTENTIAL, MOTHER_ESTABLISHED,
-    render_thumb, compute_layout, compute_positions, _draw_arrow,
-    build_person_state,
+    render_thumb, compute_layout, compute_positions, compute_tree_positions,
+    _draw_arrow, build_person_state,
 )
 from wfc import (
     EdgeState, NoSelfEdgeConstraint,
@@ -230,7 +230,13 @@ def render_frame(graph: GrowingWFCGraph,
         gender_dom = graph.domain(node_id, "gender")
         g_suffix = ("M" if gender_dom.get_value() == "male" else "F") \
             if gender_dom.is_collapsed() else "?"
-        draw.text((cx_n - 12, paste_y + thumb_h + 2), f"P{node_id} {g_suffix}",
+        age_dom = graph.domain(node_id, "age")
+        if age_dom.is_collapsed():
+            age_str = str(age_dom.get_value())
+        else:
+            age_str = f"{min(age_dom.values)}-{max(age_dom.values)}"
+        draw.text((cx_n - 40, paste_y + thumb_h + 2),
+                  f"P{node_id} {g_suffix} ({age_str})",
                   fill=(0, 0, 0, 255), font=font_bold)
 
     # Draw phantom at 40% opacity with "?" label
@@ -360,6 +366,26 @@ def generate_animation(n_target: int, seed: int, output_dir: str,
             if result is None:
                 break
             capture()                              # one property collapsed
+
+    # --- Tree layout transition (5 frames, concrete nodes only) ---
+    final_circle = {cid: all_positions[k]
+                    for k, cid in enumerate(solver.concrete_ids)}
+    tree_pos = compute_tree_positions(solver.graph, solver.concrete_ids,
+                                      canvas_dim, thumb_h)
+    for step in range(1, 6):
+        t = step / 5
+        interp = {
+            nid: (
+                int(final_circle[nid][0] + t * (tree_pos[nid][0] - final_circle[nid][0])),
+                int(final_circle[nid][1] + t * (tree_pos[nid][1] - final_circle[nid][1])),
+            )
+            for nid in solver.concrete_ids
+        }
+        frames.append(render_frame(
+            solver.graph, solver.concrete_ids, None,
+            interp, canvas_dim, thumb_w, thumb_h,
+            cache, fixed_clothes, per_person, len(frames),
+        ))
 
     # Save frames
     out_path = Path(output_dir)
